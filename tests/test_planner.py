@@ -125,5 +125,20 @@ class OpenAIPlannerFallbackTests(unittest.TestCase):
         self.assertEqual(action.action, "evaluate_seed")
 
 
+class PlannerPromptTests(unittest.TestCase):
+    def test_every_allowed_action_is_described(self) -> None:
+        from alpha_agent import planner
+
+        self.assertEqual(set(planner._PLANNER_ACTIONS), planner.ALLOWED_ACTIONS)
+        for action in planner.ALLOWED_ACTIONS:
+            self.assertIn(f"- {action}:", planner.PLANNER_SYSTEM_PROMPT)
+
+    def test_output_contract_lists_every_parsed_key(self) -> None:
+        from alpha_agent.planner import PLANNER_SYSTEM_PROMPT
+
+        for key in ("action", "batch_size", "rationale", "hypothesis", "focus_family", "risk_note", "target_alpha_id"):
+            self.assertIn(f'"{key}"', PLANNER_SYSTEM_PROMPT)
+
+
 if __name__ == "__main__":
     unittest.main()

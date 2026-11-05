@@ -1,0 +1,31 @@
+{
+  "note": "Four candidates produced by the legacy correlation-repair generator in one live run (agent_b461acab28). They are permutations of the same cross-sectional wrapper chain applied to one price-reversal leg; the platform returned identical metrics for all four, i.e. the repairs were behaviorally null and burned half the simulation budget.",
+  "source_run": "agent_b461acab28",
+  "settings": {
+    "instrumentType": "EQUITY",
+    "region": "USA",
+    "universe": "TOP3000",
+    "delay": 1,
+    "decay": 0,
+    "neutralization": "SECTOR",
+    "truncation": 0.08,
+    "pasteurization": "ON",
+    "unitHandling": "VERIFY",
+    "nanHandling": "ON",
+    "language": "FASTEXPR",
+    "visualization": false
+  },
+  "observed": {
+    "sharpe": 1.7,
+    "fitness": 1.06,
+    "self_correlation": 0.7673,
+    "failed_checks": ["SELF_CORRELATION"]
+  },
+  "alpha_ids": ["VkdG9dqJ", "6XAp8EAG", "d5KZXJlx", "gJW8OYQO"],
+  "expressions": [
+    "((ts_mean(-scl12_buzz, 8))) + group_rank((group_neutralize(rank((rank(-ts_delta(close, 5)))), industry)), industry)",
+    "((ts_mean(-scl12_buzz, 8))) + group_neutralize(rank((group_rank((rank(-ts_delta(close, 5))), industry))), industry)",
+    "(((ts_mean(-scl12_buzz, 8)))) + group_neutralize(rank((group_rank((group_neutralize(rank((rank(-ts_delta(close, 5)))), industry)), industry))), industry)",
+    "(((ts_mean(-scl12_buzz, 8)))) + group_neutralize(rank((group_neutralize(rank((group_rank((rank(-ts_delta(close, 5))), industry))), industry))), industry)"
+  ]
+}

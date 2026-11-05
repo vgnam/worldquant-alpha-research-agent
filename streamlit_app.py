@@ -1720,10 +1720,16 @@ def sidebar_controls() -> tuple[AgentRuntimeConfig, bool, Dict[str, Any]]:
             workdir=workdir,
             idea_library=idea_library,
             fields_summary=fields_summary,
+            # Same arena as the CLI (alpha_research_agent.py reads these too).
+            region=env_str("ALPHA_AGENT_REGION", "USA").upper(),
+            universe=env_str("ALPHA_AGENT_UNIVERSE", "TOP3000").upper(),
+            delay=env_int("ALPHA_AGENT_DELAY", 1),
+            tree_state_path=Path(env_str("ALPHA_AGENT_TREE_STATE_PATH")) if env_str("ALPHA_AGENT_TREE_STATE_PATH") else None,
         ),
     )
     preview = {
         "planner": f"{runtime.model.provider}:{runtime.model.model}",
+        "arena": f"{runtime.agent.region}/{runtime.agent.universe} D{runtime.agent.delay}",
         "temperature": runtime.model.temperature,
         "budget": runtime.agent.budget,
         "iterations": runtime.agent.max_iterations,

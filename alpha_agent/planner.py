@@ -2,12 +2,11 @@ from __future__ import annotations
 
 import json
 import os
-import urllib.error
-import urllib.request
 from dataclasses import dataclass
 from typing import Any, Dict, Optional
 
 from alpha_agent.config import ModelConfig
+from alpha_agent.llm_http import post_chat_completion, warn
 
 
 ALLOWED_ACTIONS = {
@@ -18,6 +17,70 @@ ALLOWED_ACTIONS = {
     "submit_best",
     "stop",
 }
+
+
+# ---------------------------------------------------------------------------
+# LLM planner prompt
+# ---------------------------------------------------------------------------
+# The system prompt carries the whole policy; the user message is only the run
+# context. Each section is one constant so a rule is edited in one place.
+
+_PLANNER_ROLE = (
+    "You are a senior quantitative research lead managing an alpha research book on "
+    "WorldQuant BRAIN. Operate like a disciplined PM: hypothesis-driven, risk-aware and "
+    "budget-constrained. Each call, choose the single next action for the run."
+)
+
+#: What each action does, and when it fits. Keys must match ``ALLOWED_ACTIONS``.
+_PLANNER_ACTIONS = {
+    "evaluate_seed": "simulate seeds from the seed queue (needs seed_queue_remaining > 0).",
+    "evaluate_refine": "mutate frontier candidates to fix their failed checks "
+    "(needs refine_candidates_available > 0).",
+    "evaluate_diversify": "simulate candidates from families the frontier lacks "
+    "(needs diversification_candidates_available > 0).",
+    "evaluate_robustness": "stress-test top candidates over universe, neutralization and truncation "
+    "changes (needs robustness_candidates_available > 0).",
+    "submit_best": "submit best_submittable_alpha_id; set target_alpha_id to it.",
+    "stop": "end the run, e.g. when nothing useful is left to evaluate.",
+}
+
+#: Stage policy, in the order a run moves through them (``research_stage``).
+_PLANNER_STAGES = {
+    "explore": "maximise family and expression diversity.",
+    "exploit": "attack the dominant failed checks (failed_check_histogram) with targeted mutations.",
+    "robustness": "stress-test top candidates; if the frontier is blocked by SELF_CORRELATION or "
+    "PROD_CORRELATION, refine to decorrelate first.",
+    "harvest": "submit when a submittable alpha exists and governance allows.",
+}
+
+_PLANNER_RULES = (
+    "batch_size must not exceed remaining_budget nor the candidates available for the action.",
+    "Prefer robustness before submission.",
+    "Submit only in harvest or robustness, only with best_submittable_alpha_id set, and only "
+    "when submission_mode allows it.",
+    "Never mark a correlation-failed candidate as ready to submit.",
+    "hypothesis is one concise claim the next batch can confirm or refute.",
+)
+
+_PLANNER_OUTPUT = (
+    "Return strict JSON only, with exactly these keys:\n"
+    '{"action": str, "batch_size": int, "rationale": str, "hypothesis": str, '
+    '"focus_family": str|null, "risk_note": str, "target_alpha_id": str|null}'
+)
+
+
+def _bullets(lines) -> str:
+    return "\n".join(f"- {line}" for line in lines)
+
+
+PLANNER_SYSTEM_PROMPT = "\n\n".join([
+    _PLANNER_ROLE,
+    "## Actions\n" + _bullets(f"{name}: {meaning}" for name, meaning in _PLANNER_ACTIONS.items()),
+    "## Stages (explore -> exploit -> robustness -> harvest)\n"
+    + _bullets(f"{name}: {policy}" for name, policy in _PLANNER_STAGES.items()),
+    "## Rules\n" + _bullets(_PLANNER_RULES),
+    "## Output\n" + _PLANNER_OUTPUT,
+])
 
 
 @dataclass(frozen=True)
@@ -237,6 +300,9 @@ class OpenAIJsonPlanner:
     def __init__(self, model_config: ModelConfig, fallback: Optional[HeuristicPlanner] = None) -> None:
         self.model_config = model_config
         self.fallback = fallback or HeuristicPlanner()
+        self.failures = 0
+        self.consecutive_failures = 0
+        self.last_error: Optional[str] = None
 
     def decide(self, context: Dict[str, Any]) -> PlannerAction:
         remaining_budget = int(context.get("remaining_budget") or 0)
@@ -249,33 +315,23 @@ class OpenAIJsonPlanner:
         try:
             payload = self._request_plan(context=context, api_key=api_key)
             action = self._parse_action(payload=payload, remaining_budget=remaining_budget)
+            self.consecutive_failures = 0
             return action
-        except Exception:
-            # Any planner failure falls back to deterministic behavior.
+        except Exception as exc:
+            # Any planner failure falls back to deterministic behavior, loudly.
+            self.failures += 1
+            self.consecutive_failures += 1
+            self.last_error = f"{type(exc).__name__}: {exc}"
+            warn(f"LLM planner unavailable, using heuristic planner ({self.last_error})")
             return self.fallback.decide(context)
 
     def _request_plan(self, *, context: Dict[str, Any], api_key: str) -> Dict[str, Any]:
-        system_prompt = (
-            "You are a senior quantitative research lead managing an alpha research book. "
-            "Operate like a disciplined PM: hypothesis-driven, risk-aware, and budget-constrained. "
-            "Use stage-aware behavior: explore -> exploit -> robustness -> harvest. "
-            "Always return strict JSON with keys: action, batch_size, rationale, hypothesis, focus_family, "
-            "risk_note, target_alpha_id. "
-            "Allowed actions: evaluate_seed, evaluate_refine, evaluate_diversify, evaluate_robustness, submit_best, stop. "
-            "Never exceed remaining_budget. Prefer robustness before submission."
-        )
         user_prompt = (
-            "Given this run context, decide the next best action.\n"
-            "Decision policy:\n"
-            "1) In explore, maximize family and expression diversity.\n"
-            "2) In exploit, attack dominant failed checks with targeted mutations.\n"
-            "3) In robustness, stress test top candidates over universe/neutralization/truncation changes.\n"
-            "4) Submit only in harvest/robustness when governance allows.\n"
-            "5) Include one concise hypothesis that can be validated by the next batch.\n"
+            "Run context (JSON). Decide the next action.\n"
             f"{json.dumps(context, ensure_ascii=False, sort_keys=True)}"
         )
         messages = [
-            {"role": "system", "content": system_prompt},
+            {"role": "system", "content": PLANNER_SYSTEM_PROMPT},
             {"role": "user", "content": user_prompt},
         ]
         body = {
@@ -288,24 +344,13 @@ class OpenAIJsonPlanner:
         return self._extract_json_payload(response)
 
     def _chat_completion(self, *, body: Dict[str, Any], api_key: str) -> Dict[str, Any]:
-        base = self.model_config.base_url.rstrip("/")
-        url = f"{base}/chat/completions"
-        data = json.dumps(body, ensure_ascii=False).encode("utf-8")
-        request = urllib.request.Request(
-            url,
-            data=data,
-            headers={
-                "Authorization": f"Bearer {api_key}",
-                "Content-Type": "application/json",
-            },
-            method="POST",
+        return post_chat_completion(
+            base_url=self.model_config.base_url,
+            body=body,
+            api_key=api_key,
+            timeout=self.model_config.timeout,
+            reasoning_effort=self.model_config.reasoning_effort,
         )
-        try:
-            with urllib.request.urlopen(request, timeout=self.model_config.timeout) as response:
-                return json.loads(response.read().decode("utf-8"))
-        except urllib.error.HTTPError as exc:
-            raw = exc.read().decode("utf-8", errors="replace")
-            raise RuntimeError(f"Planner HTTP error: {exc.code} {raw[:400]}") from exc
 
     def _extract_json_payload(self, completion: Dict[str, Any]) -> Dict[str, Any]:
         choices = completion.get("choices")

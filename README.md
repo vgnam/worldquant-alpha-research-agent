@@ -125,7 +125,7 @@ Copy from `.env.example` and set locally (never commit secrets):
 $env:WQB_EMAIL="your_email@example.com"
 $env:WQB_PASSWORD="your_password"
 # or
-$env:WQB_COOKIE_HEADER="sessionid=...; csrftoken=..."
+$env:WQB_COOKIE_HEADER="t=...; csrftoken=..."
 
 $env:ALPHA_AGENT_PLANNER_PROVIDER="heuristic"
 $env:ALPHA_AGENT_PLANNER_MODEL="gpt5.5"
@@ -135,6 +135,14 @@ $env:OPENAI_API_KEY="..."
 ```
 
 The CLI and Streamlit app load `.env` automatically on startup. Sidebar fields are prefilled from `.env` when values are present; otherwise they start from safe defaults or blank credential fields.
+
+### Cookie header notes
+
+Password-only login is frequently blocked by the platform's reCAPTCHA/persona challenge: `POST /authentication` then answers `401` with `WWW-Authenticate: persona` and a body like `{"inquiry": "..."}`. When that happens, use `WQB_COOKIE_HEADER` instead.
+
+Copy the **entire** `Cookie` request header from a logged-in browser session (DevTools -> Network -> any request to `api.worldquantbrain.com` -> Request Headers -> `Cookie`). Do not trim it down to a single cookie name.
+
+Observed naming detail: the session cookie on the current platform is `t`, not `sessionid`. Analytics cookies (`_ga`, `_fbp`, `cookieyes-consent`, ...) can be present in the same string and are harmless to include. The client sends the string verbatim, so dropping `t` breaks authentication.
 
 ## Quick Start
 
@@ -173,6 +181,203 @@ Manual submit mode (requires terminal approval):
 ```powershell
 python .\alpha_research_agent.py --pretty run --submission-mode manual --interactive-approval
 ```
+
+### Getting an alpha submitted
+
+The funnel measured on this repo's own runs is the reason the sections below
+exist: 284 successful simulations on `USA/TOP3000 delay-1` produced **8** alphas
+that cleared the quality gates (`LOW_SHARPE ≥ 1.58`, `LOW_FITNESS ≥ 1.0`), those
+8 were **one idea wrapped eight ways**, all 8 failed `SELF_CORRELATION`
+(0.743-0.768 against a 0.70 limit) against a 1100-alpha account pool, and the
+run submitted **nothing** — the hybrid loop only submits at `harvest`, which its
+stage machine can never reach.
+
+- **Arena (`--region --universe --delay`).** The quality gates and the
+  correlation pool are both defined per arena, so this is the single biggest
+  lever on whether anything is submittable; the limits come back in every check
+  payload, so the run measures them instead of assuming. Every seed is forced
+  into the configured arena, and the deterministic/LLM proposers cannot move a
+  candidate out of it.
+- **Pool-aware seeding (`--pool-aware-seeds`, on by default).** Seeds are
+  ordered by how little of their data the account pool already owns
+  (`alpha_agent.pool_fields`): `SELF_CORRELATION` is computed on the PnL, so
+  expression similarity does not predict it (r=-0.14), but sharing a data field
+  almost guarantees it. On the real pool the seeds proposed for the first 24
+  simulations went from a mean collision risk of 0.520 to 0.358 for the same
+  queue.
+- **Field swaps of the curated seeds (`seed_field_swaps`, default 1).** The
+  curated manual seeds are the ones most likely to collide. For each, the field
+  the pool is most saturated in is replaced by a *proven but rare* field of the
+  same data group (one the pool uses in 1-25% of its alphas), keeping the
+  structure that produced the Sharpe. Proposal only: the offline filters and
+  the simulator still decide, and a swap that reads well can still be a formula
+  the field does not belong in — check `seed_collision_scan` in the log.
+- **Submitting (`--submission-mode auto_approved --max-submissions 1`).**
+  Submission no longer waits for the legacy `harvest` label: what BRAIN
+  requires is that every blocking and correlation check passes, and that is what
+  `record_is_submit_ready` enforces. One submission per run by default, because
+  BRAIN submissions are final. `--allow-pending-checks` lets an alpha through
+  while `PROD_CORRELATION` is still pending; it is off by default.
+
+### Hybrid search: multi-objective MCTS refinement
+
+`--search-mode hybrid` swaps the stage machine for a tree search, while
+reusing the same toolbox, gates, artifacts and submission governance:
+
+- refinement (MCTS, after *Navigating the Alpha Jungle*, arXiv:2505.11122):
+  the descent picks a formula node, the weakest gate dimension is targeted, an
+  LLM (or deterministic mutator) proposes refinements, and each surviving
+  candidate costs exactly one simulation. There is no rollout: the backtest is
+  the node value.
+- multi-objective value (MO-MCTS, Wang & Sebag 2012; Perez et al. 2013): every
+  node keeps the epsilon-Pareto front of the objective vectors evaluated in its
+  subtree (default: raw Sharpe, turnover (lower is better), margin and
+  expression-space divergence; no gate limit enters the objectives), and
+  backprop merges each new point into the fronts on its path. UCB is replaced
+  by an optimistic hypervolume score: a subtree's front is shifted toward
+  better by `uct_c * sqrt(ln(N_parent + 1) / (attempts + 1))` on every
+  objective, and the child whose shifted front covers the most volume **over
+  one reference set shared by every child at that step** is descended into.
+  Sharing the reference is what makes the scores comparable: scoring each child
+  against the front minus only its own points let the branch that owned most of
+  the front win every descent (measured: 20/20 sequences on a saved run), so
+  the other branches were seeded, evaluated once and abandoned. Optimism now
+  decays with `attempts` (times the descent handed the branch work), not with
+  `visits` (evaluated descendants), so a branch whose proposals are all
+  rejected offline still loses its optimism. A branch that owns a unique
+  trade-off survives even when another has the best scalar reward.
+  This replaces the former QD archive: the global front is the elite set fed to
+  crossover (e2) and reported at the end of a run.
+- the multi-objective value can switch itself off, loudly. If fewer than two
+  evaluated nodes have a complete objective vector (a resumed tree, a record
+  without a metric, or a value outside its scaling range) every hypervolume
+  score is zero and the descent would quietly become "least-tried branch
+  first". The run then emits a `pareto_blind` event, records the reason in
+  `summary.pareto_disabled_reason` and `search.pareto.disabled_reason`, and
+  continues with `value=scalar`.
+
+The default objective set is deliberately not collinear. Measured over 284
+live results: sharpe/fitness correlate at r=0.94 and sharpe/returns at 0.94
+(both opt-in), while sharpe/margin is r=0.37, which is why `margin` is the
+default third axis. Scaling ranges are the *possible* range of each metric, not
+a quality bar (`turnover` runs 0..3, so the 5.3% of live alphas with turnover
+above 1.0 stay on the front instead of being clamped onto the reference box),
+and a value outside its range is rejected and counted
+(`stats.objective_out_of_range`) instead of silently clamped.
+
+Every free filter runs before a simulation is spent: FASTEXPR parse, operator
+and data-field whitelist, behavioural duplicate detection (this is what kills
+`rank`/`group_rank` wrapper stacking), frequent-subtree avoidance and
+time-series self-nesting.
+
+```powershell
+# global flags must come before the subcommand
+python .\alpha_research_agent.py --planner-provider openai --planner-model glm-5.3 --planner-base-url https://api.mintrouter.ai/v1 run --search-mode hybrid --budget 24
+```
+
+```powershell
+# deterministic proposer only, no LLM calls
+python .\alpha_research_agent.py run --search-mode hybrid --budget 12 --no-llm-refine
+```
+
+Hybrid flags (all optional, defaults keep legacy behaviour when
+`--search-mode legacy`):
+
+| Flag | Default | Meaning |
+|---|---|---|
+| `--search-mode` | `legacy` | `legacy` = stage machine, `hybrid` = multi-objective MCTS, `mo-hifo` = population search (below) |
+| `--region` | `USA` | Arena region every seed is simulated in |
+| `--universe` | `TOP3000` | Arena universe |
+| `--delay` | `1` | Arena delay |
+| `--pool-aware-seeds` | on | Order seeds by how little the account pool covers their fields |
+| `--submission-mode` | `disabled` | `disabled` / `manual` / `auto_approved` |
+| `--max-submissions` | `1` | Cap on automatic submissions per run |
+| `--allow-pending-checks` | off | Submit while `PROD_CORRELATION` is still pending |
+| `--tree-batch-size` | `2` | simulations per iteration |
+| `--uct-c` | `0.1` | UCT exploration constant on a [0, 1] exploitation term |
+| `--widen-alpha` | `0.5` | Progressive widening exponent: widen while `floor(work**alpha) > children` |
+| `--widen-patience` | `3` | Inner nodes widen only after this many evaluations added nothing to their front; `0` restores the ungated rule |
+| `--tree-value` | `ohvi` | `ohvi` = optimistic hypervolume over a shared reference, `scalar` = UCT on max gate-margin reward |
+| `--mo-objectives` | `sharpe,turnover,margin,divergence` | Pareto objectives; `fitness` and `returns` (r=0.94 with sharpe) plus the gate margins `quality`/`correlation` are opt-in |
+| `--mo-front-size` | `24` | max points per front (smallest hypervolume contributor dropped) |
+| `--mo-epsilon` | `0.01` | near-duplicate tolerance on normalised objectives |
+| `--refine-proposals` | `6` | candidates requested per expanded node before filtering |
+| `--no-llm-refine` | off | force the deterministic proposer |
+| `--max-llm-calls` | `64` | hard cap on refinement LLM calls |
+| `--novelty-refresh` | off | refetch the account alpha pool cache |
+
+Artifacts added by hybrid runs (workdir):
+
+- `search_tree.json`: nodes (`visits`, `attempts`), rewards, gate margins,
+  objective values, and the run settings they were scored with (`objectives`,
+  `front_size`, `epsilon`, `widen_patience`), so a resumed tree is not
+  reinterpreted under a different objective set without a trace; fronts and
+  stall counters are rebuilt from the node values on load
+- `alpha_pool.json`: cached account alphas used for the divergence axis
+- `operators.json`: cached operator whitelist for offline validation
+- `agent_runs/*.json` gains a `search` block with tree stats, the global
+  Pareto front with its hypervolume, and per-reason filter counts
+
+Two measured caveats worth knowing before reading hybrid reports:
+
+- **Expression similarity does not predict `SELF_CORRELATION`.** Against 15
+  evaluated alphas the rank correlation was -0.14 (full pool) and -0.19
+  (submitted-only pool). One alpha was textually identical to a submitted alpha
+  yet passed at 0.6206, while a structurally distant one failed at 0.7715. The
+  divergence axis is therefore reported as *diversity*, never as a correlation
+  forecast; the only trustworthy correlation number is the platform check.
+- **`correlation` is a weak objective early on.** Until the platform reports a
+  correlation check it counts as margin 0.0 (exactly at the limit), so it only
+  separates candidates that already cleared the quality gates; it is opt-in
+  via `--mo-objectives`.
+- **Correlation is only computed for alphas that clear the quality gates.** In
+  a live smoke run, three refinements with Sharpe 0.60-0.92 sat at
+  `SELF_CORRELATION = PENDING` indefinitely, so no signal about the binding
+  constraint was ever returned. This makes the objective effectively
+  lexicographic: a refinement that damages quality cannot teach you anything
+  about correlation, which is why `gate_fraction` dominates the hybrid reward.
+
+### Population search: `--search-mode mo-hifo`
+
+A population of alphas instead of a tree (`alpha_agent/mo_hifo.py`):
+
+- **Objectives:** maximise Sharpe and returns, minimise `max(turnover, 0.125)`.
+  The floor is the one in BRAIN's fitness, so turnover below 12.5% earns
+  nothing and a dominance step never lowers fitness. The LOW/HIGH_TURNOVER
+  band (1%..70% unless the check payload says otherwise) is a constraint:
+  feasible beats infeasible. A SELF/PROD_CORRELATION FAIL the platform
+  reported is a constraint too (violation = value - 0.7), even for alphas
+  still below the quality gates; PENDING is not penalised, since formula
+  similarity does not predict correlation. Of 58 quality-ready alphas in one
+  workdir, 42 failed PROD_CORRELATION (0.66..0.89), so breeding from a blocked
+  parent mostly reproduces the block.
+- **Selection (MEoH, AAAI 2025):** dominance-dissimilarity score
+  `v_j = -sum_{i dominates j} Sim_AST(i, j)`; parents by `softmax(v)`,
+  survival keeps the best `--population-size` by `v`.
+- **Prompt guidance (HiFo-Prompt, ICLR 2026):** an insight pool with EMA credit
+  (here Pareto-tiered: dominates members 0.8..1, joins the front 0.2..0.8,
+  dominated -0.3..0.2, rejected -0.5) and the mean Sharpe/returns/turnover
+  change each insight produced; one "avoid" insight per prompt, distilled from
+  alphas blocked by SELF/PROD correlation (at or below the quality gates). A navigator picks exploration /
+  exploitation / balanced from hypervolume stagnation and formula diversity,
+  plus `decorrelate` after a correlation block; the regime sets the operator
+  mix (`e1 e2 m1 m2 m3`) and the directive in the prompt.
+- Initialisation is one `i1` alpha from scratch, then `e1` alphas until the
+  population is full. State lives in `mo_hifo_population.json`, so `continue`
+  resumes it; offspring simulated after the last save are recovered from
+  `results.jsonl`.
+
+```powershell
+python .\alpha_research_agent.py --planner-provider openai run --search-mode mo-hifo --budget 200 --population-size 10 --population-state-path .alpha_agent/mo_hifo_eur.json
+```
+
+| Flag | Default | Meaning |
+|---|---|---|
+| `--population-size` | `10` | MEoH N: survivors and offspring per generation |
+| `--crossover-parents` | `5` | parents shown to `e1`/`e2` |
+| `--insights-per-prompt` | `3` | insights retrieved per prompt |
+| `--no-insight-extraction` | off | no extra model call per generation |
+| `--population-state-path` | `<workdir>/mo_hifo_population.json` | a new path starts a fresh population |
 
 ### Show current leaderboard
 

@@ -27,6 +27,22 @@ Whenever behavior is inferred rather than explicitly documented, the code prefer
 - Session handling: cookie-backed
 - Important caveat: the frontend also contains reCAPTCHA handling, so password-only automation may fail on challenged accounts
 
+#### Observed persona challenge
+
+On a challenged account, `POST /authentication` with correct credentials returns:
+
+```text
+401
+WWW-Authenticate: persona
+{"inquiry": "inq_..."}
+```
+
+This is not a wrong-password response. It means the platform wants an interactive challenge solved in the browser before it will mint a session. There is no known way to satisfy it headlessly, so the supported workaround is to copy the browser `Cookie` header into `WQB_COOKIE_HEADER`.
+
+#### Session cookie name
+
+The session cookie observed on the current platform is named `t`, not `sessionid`. `sessionid` does not appear at all. The client forwards the whole cookie string verbatim, so the pragmatic rule is: copy every cookie pair, never a subset.
+
 ### 2. Simulation
 
 - Metadata endpoint: `OPTIONS /simulations`
@@ -125,6 +141,25 @@ The following behaviors were confirmed live while building the pipeline:
   - final stage: `PROD_CORRELATION`
 - some expressions that look distinct are still highly correlated with existing production or self history
 - small parameter changes can move correlation checks more than quality checks
+
+## Observed Check Inventory
+
+`GET /alphas/{id}/check` currently returns **18** checks, while this repository models only a subset. Observed names:
+
+```text
+LOW_SHARPE  LOW_FITNESS  LOW_TURNOVER  HIGH_TURNOVER  CONCENTRATED_WEIGHT
+LOW_SUB_UNIVERSE_SHARPE  LOW_2Y_SHARPE  CLUSTER_TEST  DATA_DIVERSITY
+SELF_CORRELATION  PROD_CORRELATION  REGULAR_SUBMISSION  POWER_POOL_CORRELATION
+MATCHES_PYRAMID  MATCHES_THEMES  OSMOSIS_ALLOCATION
+POWER_POOL_DESCRIPTION_LENGTH  POWER_POOL_DESCRIPTION_FORMAT
+```
+
+Notes that matter for correctness:
+
+- `LOW_2Y_SHARPE` behaves like a hard quality gate (observed limit `1.58` on `USA`/`TOP3000`, `delay=1`). It was missing from the blocking set and has since been added, otherwise a candidate failing only this check would have been reported as quality-ready.
+- `CLUSTER_TEST` and `POWER_POOL_CORRELATION` came back as `WARNING` while exceeding their limits, so they may become blockers later.
+- Thresholds are account/configuration specific. `LOW_SHARPE` was observed at `1.58`, which is much stricter than the `1.25`-style thresholds often quoted for research; seeds tuned for Sharpe ~1.3 will never pass.
+- Any new check introduced by the platform is penalized only by the generic fallback weight, so `CHECK_SEVERITY_WEIGHTS` and `BLOCKING_CHECKS` should be revisited periodically.
 
 ## Caveats
 

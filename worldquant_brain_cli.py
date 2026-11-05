@@ -265,6 +265,72 @@ class BrainClient:
         self.opener = urllib.request.build_opener(
             urllib.request.HTTPCookieProcessor(self.cookie_jar)
         )
+        #: Set when a response carried a refreshed session cookie.
+        self.cookie_rotated = False
+        self._initial_cookie_header = (cookie_header or "").strip()
+        if self._initial_cookie_header:
+            self.seed_cookies(self._initial_cookie_header)
+
+    @staticmethod
+    def parse_cookie_header(header: str) -> list[tuple[str, str]]:
+        """Split a raw ``Cookie`` header into ``(name, value)`` pairs."""
+        pairs: list[tuple[str, str]] = []
+        for part in (header or "").split(";"):
+            piece = part.strip()
+            if not piece or "=" not in piece:
+                continue
+            name, value = piece.split("=", 1)
+            name = name.strip()
+            if name:
+                pairs.append((name, value.strip()))
+        return pairs
+
+    def seed_cookies(self, header: str) -> None:
+        """Load a copied browser cookie header into the jar.
+
+        Seeding the jar (instead of re-sending the raw header on every call) is
+        what allows the server to rotate the session: ``HTTPCookieProcessor``
+        stores new ``Set-Cookie`` values, and :meth:`sync_cookie_header` exposes
+        the refreshed string. Sending the original header forever was a real
+        bug: a rotated session would sit unused in the jar while the stale value
+        kept being transmitted, killing long runs.
+        """
+        for name, value in self.parse_cookie_header(header):
+            cookie = http.cookiejar.Cookie(
+                version=0,
+                name=name,
+                value=value,
+                port=None,
+                port_specified=False,
+                domain="",
+                domain_specified=False,
+                domain_initial_dot=False,
+                path="/",
+                path_specified=True,
+                secure=False,
+                expires=None,
+                discard=True,
+                comment=None,
+                comment_url=None,
+                rest={},
+                rfc2109=False,
+            )
+            self.cookie_jar.set_cookie(cookie)
+        self.sync_cookie_header()
+
+    def sync_cookie_header(self) -> str:
+        """Refresh ``cookie_header`` from the jar after any rotation."""
+        pairs = [(cookie.name, cookie.value) for cookie in self.cookie_jar]
+        if not pairs:
+            return self.cookie_header or ""
+        rebuilt = "; ".join(f"{name}={value}" for name, value in pairs)
+        if self.cookie_header and rebuilt != self.cookie_header:
+            self.cookie_rotated = True
+        self.cookie_header = rebuilt
+        return rebuilt
+
+    def has_session_cookies(self) -> bool:
+        return any(True for _ in self.cookie_jar)
 
     def login(self, email: str, password: str) -> Any:
         token = base64.b64encode(f"{email}:{password}".encode("utf-8")).decode("ascii")
@@ -319,6 +385,77 @@ class BrainClient:
                 "Failed to fetch data fields summary.",
             )
         return response.data
+
+    def fetch_data_fields(
+        self,
+        *,
+        region: str = "USA",
+        universe: str = "TOP3000",
+        delay: int = 1,
+        instrument_type: str = "EQUITY",
+        #: The endpoint caps the page size at 50 ("pagination limit too high").
+        limit: int = 50,
+        max_records: int = 12000,
+        ids: Optional[Any] = None,
+    ) -> Any:
+        """Data fields with their ``type`` (MATRIX / VECTOR / GROUP) for an arena.
+
+        ``/data-fields/summary`` only carries ids; the per-arena listing carries
+        the type, coverage and ``userCount`` that offline validation needs.
+        ``ids`` names specific fields: the API has no bulk id filter (a comma
+        list returns nothing and a repeated parameter keeps only the last one),
+        so each is a separate request — which is why callers pass a short list
+        rather than listing the arena.
+        """
+        if ids:
+            collected: list[Any] = []
+            for field_id in list(ids)[:200]:
+                query = urllib.parse.urlencode(
+                    {
+                        "instrumentType": instrument_type,
+                        "region": region,
+                        "delay": delay,
+                        "universe": universe,
+                        "limit": 10,
+                        "id": field_id,
+                    }
+                )
+                response = self._request("GET", f"/data-fields?{query}", accept=ACCEPT_V2)
+                if response.status >= 400:
+                    continue
+                payload = response.data
+                results = payload.get("results") if isinstance(payload, dict) else payload
+                if isinstance(results, list):
+                    collected.extend(item for item in results if isinstance(item, dict))
+            return collected
+        collected = []
+        offset = 0
+        while len(collected) < max(1, max_records):
+            query = urllib.parse.urlencode(
+                {
+                    "instrumentType": instrument_type,
+                    "region": region,
+                    "delay": delay,
+                    "universe": universe,
+                    "limit": limit,
+                    "offset": offset,
+                }
+            )
+            response = self._request("GET", f"/data-fields?{query}", accept=ACCEPT_V2)
+            if response.status >= 400:
+                raise BrainApiError.from_response(
+                    response,
+                    "Failed to fetch data fields.",
+                )
+            payload = response.data
+            results = payload.get("results") if isinstance(payload, dict) else payload
+            if not isinstance(results, list) or not results:
+                break
+            collected.extend(item for item in results if isinstance(item, dict))
+            if len(results) < limit:
+                break
+            offset += limit
+        return collected
 
     def simulate(self, payload: Any, *, max_wait: float, poll_interval: float) -> Any:
         response = self._request(
@@ -447,7 +584,10 @@ class BrainClient:
             "User-Agent": USER_AGENT,
             "Accept": accept,
         }
-        if self.cookie_header:
+        # Prefer the jar: it applies Set-Cookie rotations automatically. Fall
+        # back to the raw header only when the jar is empty (e.g. a client built
+        # with a cookie string that failed to parse).
+        if not self.has_session_cookies() and self.cookie_header:
             request_headers["Cookie"] = self.cookie_header
         if headers:
             request_headers.update(headers)
@@ -461,6 +601,7 @@ class BrainClient:
         try:
             with self.opener.open(request, timeout=self.timeout) as response:
                 body = response.read()
+                self.sync_cookie_header()
                 return ApiResponse(
                     status=response.status,
                     headers=dict(response.headers.items()),
@@ -470,6 +611,7 @@ class BrainClient:
                 )
         except urllib.error.HTTPError as exc:
             body = exc.read()
+            self.sync_cookie_header()
             return ApiResponse(
                 status=exc.code,
                 headers=dict(exc.headers.items()),
@@ -477,6 +619,12 @@ class BrainClient:
                 data=maybe_json_decode(body),
                 url=exc.geturl(),
             )
+        except (urllib.error.URLError, OSError) as exc:
+            # Read timeouts and connection resets (socket.timeout is an OSError,
+            # not TimeoutError, before 3.10). Raised as BrainApiError with no
+            # status so callers can retry them instead of crashing a whole run.
+            reason = getattr(exc, "reason", None) or exc
+            raise BrainApiError(f"Network error: {reason}", status=None, url=url) from exc
 
 
 def command_options(args: argparse.Namespace, client: BrainClient) -> Any:

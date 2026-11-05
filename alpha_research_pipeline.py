@@ -23,6 +23,7 @@ from worldquant_brain_cli import (
     BrainApiError,
     BrainClient,
     extract_alpha_id,
+    parse_retry_after,
     summarize_checks,
 )
 
@@ -33,6 +34,14 @@ DEFAULT_IDEA_LIBRARY = Path(__file__).with_name("alpha_pipeline_ideas.json")
 DEFAULT_FIELDS_SUMMARY = Path(__file__).with_name("wqb_data_fields_summary.json")
 DEFAULT_WORKDIR = Path(__file__).with_name(".alpha_pipeline")
 DEFAULT_USER_AGENT = "worldquant-alpha-research/0.1"
+#: Times a read-only alpha request is retried after a ``404`` (see
+#: :func:`retry_alpha_read`), and the linear backoff between them.
+ALPHA_READ_RETRIES = 4
+ALPHA_READ_DELAY = 2.0
+#: How long to wait after a ``429`` when the platform does not say. The account
+#: was seen answering with ``Retry-After: 45-52``; retrying sooner just spends
+#: the attempt inside the limit.
+ALPHA_RATE_LIMIT_WAIT = 60.0
 BLOCKING_CHECKS = {
     "LOW_SHARPE",
     "LOW_FITNESS",
@@ -40,6 +49,12 @@ BLOCKING_CHECKS = {
     "HIGH_TURNOVER",
     "CONCENTRATED_WEIGHT",
     "LOW_SUB_UNIVERSE_SHARPE",
+    # Added after observing the live check payload: the platform reports
+    # LOW_2Y_SHARPE as a hard quality gate (limit 1.58 on USA/TOP3000 here),
+    # so a candidate failing it must never be treated as quality-ready.
+    "LOW_2Y_SHARPE",
+    # Same story: reported as FAIL with limit 1.58 / value 1.11, i.e. a real gate.
+    "IS_LADDER_SHARPE",
 }
 CORRELATION_CHECKS = {
     "SELF_CORRELATION",
@@ -53,6 +68,8 @@ CHECK_SEVERITY_WEIGHTS = {
     "HIGH_TURNOVER": 180.0,
     "CONCENTRATED_WEIGHT": 260.0,
     "LOW_SUB_UNIVERSE_SHARPE": 220.0,
+    "LOW_2Y_SHARPE": 200.0,
+    "IS_LADDER_SHARPE": 200.0,
     "SELF_CORRELATION": 360.0,
     "PROD_CORRELATION": 520.0,
 }
@@ -719,6 +736,71 @@ def emit_progress(
     progress_callback(payload)
 
 
+#: Statuses a simulation reports instead of producing an alpha.
+SIMULATION_ERROR_STATUSES = frozenset({"ERROR", "FAIL", "FAILED"})
+
+
+class SimulationRejected(BrainApiError):
+    """The platform rejected the formula itself; no alpha was created.
+
+    ``status`` stays None because no HTTP error happened — the failure arrives
+    inside the simulation envelope — but this must never be retried: the same
+    expression fails the same way. Before this existed, the caller extracted
+    the *simulation* id, asked ``GET /alphas/<simulation id>`` and reported
+    ``404 Not found``, so a rejected formula looked like an API problem and the
+    platform's own diagnosis ("Operator ts_decay_linear does not support event
+    inputs") was thrown away — including from the negative examples fed back to
+    the proposer.
+    """
+
+
+def simulation_error(simulation: Any) -> Optional[str]:
+    """The platform's reason for a simulation that produced no alpha."""
+    if not isinstance(simulation, dict):
+        return None
+    if simulation.get("alpha"):
+        return None
+    status = str(simulation.get("status") or "").upper()
+    message = str(simulation.get("message") or "").strip()
+    if status in SIMULATION_ERROR_STATUSES:
+        return message or f"simulation status {status}"
+    return None
+
+
+def retry_alpha_read(
+    call: Callable[[], Any],
+    *,
+    tries: Optional[int] = None,
+    delay: Optional[float] = None,
+) -> Any:
+    """Run a read-only alpha request, retrying the "not there yet" 404.
+
+    The platform intermittently answers ``404`` for an alpha it has *just*
+    created from a simulation; the record is readable a few seconds later. The
+    retry policy in :func:`evaluate_candidate` could not help there, because it
+    retries the whole candidate — which pays for a second simulation. Measured
+    on a live run: 27 of 311 simulations (8.7%) were thrown away this way, and
+    one 100-simulation run lost 2 of its first 3.
+
+    Only ``404`` is retried, and only here: re-reading is free, re-simulating
+    is not.
+    """
+    attempts = max(1, int(ALPHA_READ_RETRIES if tries is None else tries))
+    pause = ALPHA_READ_DELAY if delay is None else float(delay)
+    last: Optional[BrainApiError] = None
+    for attempt in range(attempts):
+        try:
+            return call()
+        except BrainApiError as exc:
+            if exc.status != 404:
+                raise
+            last = exc
+            if attempt + 1 < attempts and pause > 0:
+                time.sleep(pause * (attempt + 1))
+    assert last is not None
+    raise last
+
+
 def evaluate_candidate(
     *,
     client: BrainClient,
@@ -738,9 +820,14 @@ def evaluate_candidate(
                 "regular": candidate.expression,
             }
             simulation = client.simulate(payload, max_wait=max_wait, poll_interval=poll_interval)
+            rejection = simulation_error(simulation)
+            if rejection:
+                raise SimulationRejected(f"Simulation rejected: {rejection}", payload=simulation)
             alpha_id = extract_alpha_id(simulation)
-            detail = client.fetch_alpha_detail(alpha_id)
-            check_payload = client.check_alpha(alpha_id, max_wait=max_wait, poll_interval=poll_interval)
+            detail = retry_alpha_read(lambda: client.fetch_alpha_detail(alpha_id))
+            check_payload = retry_alpha_read(
+                lambda: client.check_alpha(alpha_id, max_wait=max_wait, poll_interval=poll_interval)
+            )
             summary = summarize_checks(check_payload)
             metrics = extract_metrics(detail, check_payload)
             blocking = failed_blocking_checks(check_payload)
@@ -777,9 +864,23 @@ def evaluate_candidate(
             }
             return record
         except BrainApiError as exc:
-            is_retryable = exc.status in {429, 500, 502, 503, 504}
+            # status None = network error (timeout / reset) from BrainClient._request.
+            # A formula the platform rejected also has no HTTP status, but it is
+            # deterministic: retrying it only burns wall clock.
+            is_retryable = not isinstance(exc, SimulationRejected) and (
+                exc.status is None or exc.status in {429, 500, 502, 503, 504}
+            )
             if is_retryable and attempts <= max(0, retries):
-                time.sleep(min(30.0, float(attempts * 5)))
+                # The platform answers 429 with Retry-After around 45-60s on this
+                # account. A fixed 5s/10s backoff retried into the limit and
+                # spent every attempt there, so honour the header when present.
+                wait = ALPHA_RATE_LIMIT_WAIT
+                if isinstance(exc.status, int) and exc.status == 429:
+                    hinted = parse_retry_after((exc.headers or {}).get("Retry-After"))
+                    wait = min(ALPHA_RATE_LIMIT_WAIT, (hinted or 0.0) + 1.0) if hinted else ALPHA_RATE_LIMIT_WAIT
+                else:
+                    wait = min(30.0, float(attempts * 5))
+                time.sleep(wait)
                 continue
             return {
                 **candidate.to_record(),
@@ -797,7 +898,7 @@ def evaluate_candidate(
 
 
 def extract_metrics(detail: Dict[str, Any], check_payload: Any) -> Dict[str, Any]:
-    is_data = detail.get("is") if isinstance(detail, dict) else {}
+    is_data = (detail.get("is") if isinstance(detail, dict) else {}) or {}
     checks = extract_checks(check_payload)
     metrics = {
         "sharpe": safe_float(is_data.get("sharpe")),
@@ -814,6 +915,8 @@ def extract_metrics(detail: Dict[str, Any], check_payload: Any) -> Dict[str, Any
         "HIGH_TURNOVER",
         "CONCENTRATED_WEIGHT",
         "LOW_SUB_UNIVERSE_SHARPE",
+        "LOW_2Y_SHARPE",
+        "IS_LADDER_SHARPE",
     ):
         check = next((item for item in checks if item.get("name") == name), None)
         if not check:
@@ -980,7 +1083,7 @@ def correlation_pivot_families(records: Iterable[Dict[str, Any]]) -> set[str]:
 
 
 def score_result(detail: Dict[str, Any], check_payload: Any) -> float:
-    is_data = detail.get("is") if isinstance(detail, dict) else {}
+    is_data = (detail.get("is") if isinstance(detail, dict) else {}) or {}
     sharpe = safe_float(is_data.get("sharpe")) or 0.0
     fitness = safe_float(is_data.get("fitness")) or 0.0
     turnover = safe_float(is_data.get("turnover")) or 0.0

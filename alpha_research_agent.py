@@ -38,6 +38,18 @@ def parse_args() -> argparse.Namespace:
     add_run_args(run_parser)
     run_parser.set_defaults(func=command_run)
 
+    continue_parser = subparsers.add_parser(
+        "continue",
+        help="Resume the last run (e.g. after refreshing WQB_COOKIE_HEADER) with its settings and remaining budget.",
+    )
+    continue_parser.add_argument(
+        "--budget",
+        type=int,
+        default=None,
+        help="Simulations for this continuation (default: what the last run had left).",
+    )
+    continue_parser.set_defaults(func=command_continue)
+
     leaderboard_parser = subparsers.add_parser("leaderboard", help="Show current leaderboard from workdir.")
     leaderboard_parser.add_argument("--limit", type=int, default=10)
     leaderboard_parser.set_defaults(func=command_leaderboard)
@@ -82,17 +94,17 @@ def add_auth_args(parser: argparse.ArgumentParser) -> None:
 def add_common_agent_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--idea-library",
-        default=str(pipeline.DEFAULT_IDEA_LIBRARY),
+        default=os.getenv("ALPHA_AGENT_IDEA_LIBRARY") or str(pipeline.DEFAULT_IDEA_LIBRARY),
         help="Path to idea library JSON.",
     )
     parser.add_argument(
         "--fields-summary",
-        default=str(pipeline.DEFAULT_FIELDS_SUMMARY),
+        default=os.getenv("ALPHA_AGENT_FIELDS_SUMMARY") or str(pipeline.DEFAULT_FIELDS_SUMMARY),
         help="Path to cached fields summary JSON.",
     )
     parser.add_argument(
         "--workdir",
-        default=str(DEFAULT_AGENT_WORKDIR),
+        default=os.getenv("ALPHA_AGENT_WORKDIR") or str(DEFAULT_AGENT_WORKDIR),
         help="Agent working directory for results/state/logs.",
     )
     parser.add_argument(
@@ -121,6 +133,18 @@ def add_common_agent_args(parser: argparse.ArgumentParser) -> None:
         "--planner-api-key-env",
         default=os.getenv("ALPHA_AGENT_PLANNER_API_KEY_ENV", "OPENAI_API_KEY"),
         help="Environment variable name that stores planner API key.",
+    )
+    parser.add_argument(
+        "--planner-timeout",
+        type=float,
+        default=float(os.getenv("ALPHA_AGENT_PLANNER_TIMEOUT", "90")),
+        help="Planner / refinement LLM request timeout in seconds.",
+    )
+    parser.add_argument(
+        "--planner-reasoning-effort",
+        choices=["low", "medium", "high"],
+        default=os.getenv("ALPHA_AGENT_PLANNER_REASONING_EFFORT") or os.getenv("OPENAI_REASONING_EFFORT") or None,
+        help="reasoning_effort sent to the LLM (omitted when unset).",
     )
 
 
@@ -169,10 +193,238 @@ def add_run_args(parser: argparse.ArgumentParser) -> None:
         help="Submission governance mode.",
     )
     parser.add_argument(
+        "--max-submissions",
+        type=int,
+        default=int(os.getenv("ALPHA_AGENT_MAX_SUBMISSIONS", "1")),
+        help="Cap on automatic submissions per run (BRAIN submissions are final).",
+    )
+    parser.add_argument(
+        "--region",
+        default=os.getenv("ALPHA_AGENT_REGION", "USA"),
+        help="Arena region every seed is simulated in; the quality gates and the correlation pool depend on it.",
+    )
+    parser.add_argument(
+        "--universe",
+        default=os.getenv("ALPHA_AGENT_UNIVERSE", "TOP3000"),
+        help="Arena universe (TOP3000/TOP1000/TOP500/TOPDIV3000/... per region).",
+    )
+    parser.add_argument(
+        "--delay",
+        type=int,
+        default=int(os.getenv("ALPHA_AGENT_DELAY", "1")),
+        help="Arena delay (0 or 1).",
+    )
+    parser.add_argument(
+        "--pool-aware-seeds",
+        action=argparse.BooleanOptionalAction,
+        default=(os.getenv("ALPHA_AGENT_POOL_AWARE_SEEDS", "1") not in ("0", "false", "False")),
+        help="Order the seed queue by how little the account pool covers each seed's data fields.",
+    )
+    parser.add_argument(
         "--interactive-approval",
         action="store_true",
         help="Prompt approval in terminal when submission-mode=manual.",
     )
+    add_hybrid_args(parser)
+
+
+def add_hybrid_args(parser: argparse.ArgumentParser) -> None:
+    """Flags for the hybrid (multi-objective MCTS) search."""
+    parser.add_argument(
+        "--search-mode",
+        choices=("legacy", "hybrid", "mo-hifo"),
+        default=os.getenv("ALPHA_AGENT_SEARCH_MODE", "legacy"),
+        help="legacy = stage machine (default); hybrid = multi-objective MCTS refinement; "
+        "mo-hifo = population search on Sharpe/returns/turnover (MEoH selection, HiFo insights).",
+    )
+    parser.add_argument(
+        "--tree-batch-size",
+        type=int,
+        default=int(os.getenv("ALPHA_AGENT_TREE_BATCH_SIZE", "2")),
+        help="Simulations spent per hybrid iteration.",
+    )
+    parser.add_argument(
+        "--tree-max-depth",
+        type=int,
+        default=int(os.getenv("ALPHA_AGENT_TREE_MAX_DEPTH", "5")),
+        help="Deepest refinement chain below a root; also applied to a resumed tree.",
+    )
+    parser.add_argument(
+        "--uct-c",
+        type=float,
+        default=float(os.getenv("ALPHA_AGENT_UCT_C", "0.1")),
+        help="UCT exploration weight (MCTS-AHD lambda_0) on normalised Q; decays with remaining budget.",
+    )
+    parser.add_argument(
+        "--widen-alpha",
+        type=float,
+        default=float(os.getenv("ALPHA_AGENT_WIDEN_ALPHA", "0.5")),
+        help="Progressive widening exponent: widen while floor(work**alpha) > children.",
+    )
+    parser.add_argument(
+        "--widen-patience",
+        type=int,
+        default=int(os.getenv("ALPHA_AGENT_WIDEN_PATIENCE", "3")),
+        help="Inner nodes widen only after this many evaluations added nothing to their front (0 = never gate).",
+    )
+    parser.add_argument(
+        "--tree-value",
+        choices=("ohvi", "scalar"),
+        default=os.getenv("ALPHA_AGENT_TREE_VALUE", "ohvi"),
+        help="Child selection: ohvi = optimistic hypervolume of each subtree front; scalar = UCT on max reward.",
+    )
+    parser.add_argument(
+        "--mo-objectives",
+        default=os.getenv("ALPHA_AGENT_MO_OBJECTIVES", "sharpe,turnover,margin,divergence"),
+        help=(
+            "Comma-separated Pareto objectives: sharpe, turnover, margin, divergence, "
+            "returns, drawdown, fitness, quality, correlation."
+        ),
+    )
+    parser.add_argument(
+        "--mo-front-size",
+        type=int,
+        default=int(os.getenv("ALPHA_AGENT_MO_FRONT_SIZE", "24")),
+        help="Max points per Pareto front; the smallest hypervolume contributor is dropped beyond it.",
+    )
+    parser.add_argument(
+        "--mo-epsilon",
+        type=float,
+        default=float(os.getenv("ALPHA_AGENT_MO_EPSILON", "0.01")),
+        help="Near-duplicate tolerance on normalised objectives.",
+    )
+    parser.add_argument(
+        "--children-per-expansion",
+        type=int,
+        default=int(os.getenv("ALPHA_AGENT_CHILDREN_PER_EXPANSION", "1")),
+        help="Simulated children kept per operator call.",
+    )
+    parser.add_argument(
+        "--initial-seeds",
+        type=int,
+        default=int(os.getenv("ALPHA_AGENT_INITIAL_SEEDS", "0")),
+        help="Seed an empty tree with this many structurally diverse idea-library seeds (0 = old behaviour). "
+        "With --root-source llm: the number of LLM-written roots (0 = 4, as in MCTS-AHD).",
+    )
+    parser.add_argument(
+        "--root-source",
+        choices=("library", "llm"),
+        default=os.getenv("ALPHA_AGENT_ROOT_SOURCE", "library"),
+        help="library = idea-library seeds as roots; llm = MCTS-AHD init (one i1 root from scratch, then e1 roots).",
+    )
+    parser.add_argument(
+        "--tree-state-path",
+        default=os.getenv("ALPHA_AGENT_TREE_STATE_PATH") or None,
+        help="Search tree file (default <workdir>/search_tree.json); a new path starts a fresh tree.",
+    )
+    parser.add_argument(
+        "--max-roots",
+        type=int,
+        default=int(os.getenv("ALPHA_AGENT_MAX_ROOTS", "0")),
+        help="Cap on subtree roots created by widening (0 = unlimited).",
+    )
+    parser.add_argument(
+        "--refine-proposals",
+        type=int,
+        default=int(os.getenv("ALPHA_AGENT_REFINE_PROPOSALS", "6")),
+        help="Candidates requested per expanded node before offline filtering.",
+    )
+    parser.add_argument(
+        "--novelty-refresh",
+        action="store_true",
+        default=os.getenv("ALPHA_AGENT_NOVELTY_REFRESH", "false").lower() == "true",
+        help="Refetch the account alpha pool instead of using the cache.",
+    )
+    parser.add_argument(
+        "--no-llm-refine",
+        action="store_false",
+        dest="llm_refine_enabled",
+        help="Disable the LLM refinement proposer and use deterministic mutations.",
+    )
+    parser.add_argument(
+        "--max-llm-calls",
+        type=int,
+        default=int(os.getenv("ALPHA_AGENT_MAX_LLM_CALLS", "200")),
+        help="Hard cap on successful refinement LLM calls per run (one leaf expansion costs up to four).",
+    )
+    parser.add_argument(
+        "--require-llm",
+        action="store_true",
+        default=os.getenv("ALPHA_AGENT_REQUIRE_LLM", "false").lower() == "true",
+        help="Hybrid mode: stop instead of spending simulations on deterministic fallback mutations when the LLM fails.",
+    )
+    parser.add_argument(
+        "--llm-failure-limit",
+        type=int,
+        default=int(os.getenv("ALPHA_AGENT_LLM_FAILURE_LIMIT", "3")),
+        help="Consecutive LLM failures (each already retried) before --require-llm stops the run.",
+    )
+    parser.add_argument(
+        "--population-state-path",
+        default=os.getenv("ALPHA_AGENT_POPULATION_STATE_PATH") or None,
+        help="mo-hifo population file (default <workdir>/mo_hifo_population.json); a new path starts fresh.",
+    )
+    parser.add_argument(
+        "--population-size",
+        type=int,
+        default=int(os.getenv("ALPHA_AGENT_POPULATION_SIZE", "10")),
+        help="mo-hifo: alphas kept by survival and offspring per generation.",
+    )
+    parser.add_argument(
+        "--crossover-parents",
+        type=int,
+        default=int(os.getenv("ALPHA_AGENT_CROSSOVER_PARENTS", "5")),
+        help="mo-hifo: parents drawn for the e1/e2 operators.",
+    )
+    parser.add_argument(
+        "--insights-per-prompt",
+        type=int,
+        default=int(os.getenv("ALPHA_AGENT_INSIGHTS_PER_PROMPT", "3")),
+        help="mo-hifo: insights from the pool shown in each prompt.",
+    )
+    parser.add_argument(
+        "--no-insight-extraction",
+        action="store_false",
+        dest="extract_insights",
+        help="mo-hifo: keep the seed insights only (no extra model call per generation).",
+    )
+
+
+#: Written by ``run`` so ``continue`` can resume with the same settings and only
+#: the simulations that were left. BRAIN sessions last about four hours, so a
+#: long run outlives its cookie. Credentials are never written: ``continue``
+#: takes them from the current flags / .env (i.e. the refreshed cookie).
+RESUME_FILE = "last_run.json"
+_UNSAVED_ARGS = frozenset({"email", "password", "cookie_header", "base_url", "timeout", "pretty", "func", "command"})
+
+
+def _ok_result_count(workdir: Path) -> int:
+    path = Path(workdir) / "results.jsonl"
+    if not path.exists():
+        return 0
+    count = 0
+    for line in path.read_text(encoding="utf-8").splitlines():
+        try:
+            count += json.loads(line).get("status") == "ok"
+        except (ValueError, AttributeError):
+            continue
+    return count
+
+
+def save_resume_state(args: argparse.Namespace, *, budget: int, evaluated: int, stop_reason: Optional[str]) -> Path:
+    settings = {key: value for key, value in vars(args).items() if key not in _UNSAVED_ARGS}
+    payload = {
+        "settings": settings,
+        "budget": int(budget),
+        "evaluated": int(evaluated),
+        "remaining": max(0, int(budget) - int(evaluated)),
+        "stop_reason": stop_reason,
+        "saved_at": pipeline.iso_now(),
+    }
+    path = Path(args.workdir) / RESUME_FILE
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
+    return path
 
 
 def command_run(args: argparse.Namespace) -> Dict[str, Any]:
@@ -182,8 +434,42 @@ def command_run(args: argparse.Namespace) -> Dict[str, Any]:
     if args.submission_mode == "manual" and args.interactive_approval:
         approval_callback = cli_manual_approval
     agent = AlphaResearchAgent(runtime, planner=planner, approval_callback=approval_callback)
-    result = agent.run()
-    return result.to_dict()
+    budget = int(args.budget)
+    # Spent budget is counted from the results store, so a run that dies with
+    # an exception still leaves an accurate "remaining" behind.
+    ok_before = _ok_result_count(Path(args.workdir))
+    stop_reason: Optional[str] = "Interrupted before the run finished."
+    try:
+        payload = agent.run().to_dict()
+        stop_reason = (payload.get("summary") or payload).get("stop_reason")
+        return payload
+    finally:
+        save_resume_state(
+            args,
+            budget=budget,
+            evaluated=_ok_result_count(Path(args.workdir)) - ok_before,
+            stop_reason=stop_reason,
+        )
+
+
+def command_continue(args: argparse.Namespace) -> Dict[str, Any]:
+    path = Path(args.workdir) / RESUME_FILE
+    if not path.exists():
+        raise ValueError(f"No saved run in {path}; start one with `run` first.")
+    saved = json.loads(path.read_text(encoding="utf-8"))
+    budget = int(args.budget) if args.budget is not None else int(saved.get("remaining") or 0)
+    if budget <= 0:
+        return {"status": "nothing_to_continue", "resume_file": str(path), **{k: saved.get(k) for k in ("budget", "evaluated", "stop_reason")}}
+    # Flags added after the run was saved take today's default (.env); saved
+    # values win for everything the run already had.
+    run_defaults = argparse.ArgumentParser(add_help=False)
+    add_run_args(run_defaults)
+    resumed = argparse.Namespace(**{**vars(run_defaults.parse_args([])), **saved["settings"]})
+    # Auth and connection come from now (the refreshed cookie), not the saved run.
+    for key in ("email", "password", "cookie_header", "base_url", "timeout", "pretty"):
+        setattr(resumed, key, getattr(args, key))
+    resumed.budget = budget
+    return command_run(resumed)
 
 
 def command_leaderboard(args: argparse.Namespace) -> Dict[str, Any]:
@@ -222,6 +508,8 @@ def build_runtime(args: argparse.Namespace, run_overrides: Optional[Dict[str, An
         temperature=args.planner_temperature,
         base_url=args.planner_base_url,
         api_key_env=args.planner_api_key_env,
+        timeout=float(getattr(args, "planner_timeout", 90.0)),
+        reasoning_effort=getattr(args, "planner_reasoning_effort", None),
     )
     base_agent = AgentConfig(
         budget=getattr(args, "budget", 24),
@@ -241,9 +529,46 @@ def build_runtime(args: argparse.Namespace, run_overrides: Optional[Dict[str, An
         poll_interval=getattr(args, "poll_interval", DEFAULT_POLL_INTERVAL),
         allow_pending_checks=getattr(args, "allow_pending_checks", False),
         submission_mode=getattr(args, "submission_mode", "disabled"),
+        max_submissions_per_run=getattr(args, "max_submissions", 1),
         workdir=Path(args.workdir),
         idea_library=Path(args.idea_library),
         fields_summary=Path(args.fields_summary),
+        region=getattr(args, "region", "USA"),
+        universe=getattr(args, "universe", "TOP3000"),
+        delay=getattr(args, "delay", 1),
+        pool_aware_seeds=getattr(args, "pool_aware_seeds", True),
+        search_mode=getattr(args, "search_mode", "legacy"),
+        tree_batch_size=getattr(args, "tree_batch_size", 2),
+        tree_max_depth=getattr(args, "tree_max_depth", 5),
+        uct_c=getattr(args, "uct_c", 0.1),
+        widen_alpha=getattr(args, "widen_alpha", 0.5),
+        widen_patience=getattr(args, "widen_patience", 3),
+        tree_value=getattr(args, "tree_value", "ohvi"),
+        mo_objectives=tuple(
+            name.strip()
+            for name in str(getattr(args, "mo_objectives", "sharpe,turnover,margin,divergence")).split(",")
+            if name.strip()
+        ),
+        mo_front_size=getattr(args, "mo_front_size", 24),
+        mo_epsilon=getattr(args, "mo_epsilon", 0.01),
+        children_per_expansion=getattr(args, "children_per_expansion", 1),
+        max_roots=getattr(args, "max_roots", 0),
+        initial_seed_count=getattr(args, "initial_seeds", 0),
+        root_source=getattr(args, "root_source", "library"),
+        tree_state_path=Path(args.tree_state_path) if getattr(args, "tree_state_path", None) else None,
+        refine_proposals=getattr(args, "refine_proposals", 6),
+        novelty_refresh=getattr(args, "novelty_refresh", False),
+        llm_refine_enabled=getattr(args, "llm_refine_enabled", True),
+        max_llm_calls=getattr(args, "max_llm_calls", 64),
+        require_llm=getattr(args, "require_llm", False),
+        llm_failure_limit=getattr(args, "llm_failure_limit", 3),
+        mo_hifo_state_path=(
+            Path(args.population_state_path) if getattr(args, "population_state_path", None) else None
+        ),
+        population_size=getattr(args, "population_size", 10),
+        crossover_parents=getattr(args, "crossover_parents", 5),
+        insights_per_prompt=getattr(args, "insights_per_prompt", 3),
+        extract_insights=getattr(args, "extract_insights", True),
     )
     if run_overrides:
         base_agent = replace(base_agent, **run_overrides)
@@ -289,6 +614,10 @@ def main() -> int:
             print(json.dumps(exc.payload, ensure_ascii=False, indent=2), file=sys.stderr)
         return 1
     except Exception as exc:
+        import traceback
+
+        # A bare message ("The read operation timed out") hid where a run died.
+        traceback.print_exc(file=sys.stderr)
         print(str(exc), file=sys.stderr)
         return 1
 

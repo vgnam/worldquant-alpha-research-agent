@@ -256,10 +256,10 @@ def build_check_aware_refinements(
         if "LOW_SUB_UNIVERSE_SHARPE" in failed_checks:
             universe_pool.update({"TOP3000"})
             neutral_pool.update({"INDUSTRY", "SUBINDUSTRY"})
-        if "LOW_SHARPE" in failed_checks or "LOW_FITNESS" in failed_checks:
-            decay_pool.update({2, 4, 6})
+        if "LOW_SHARPE" in failed_checks or "LOW_FITNESS" in failed_checks or "LOW_2Y_SHARPE" in failed_checks:
+            decay_pool.update({2, 4, 6, 8})
             universe_pool.update({"TOP3000", "TOP1000"})
-            neutral_pool.update({"SECTOR", "INDUSTRY"})
+            neutral_pool.update({"SECTOR", "INDUSTRY", "SUBINDUSTRY"})
 
         if not failed_checks:
             decay_pool.update({2, 4, 6})

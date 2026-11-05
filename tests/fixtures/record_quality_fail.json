@@ -1,0 +1,236 @@
+{
+ "note": "Quality fails (LOW_SHARPE 1.31 vs 1.58, LOW_FITNESS 0.51 vs 1.0) and PROD_CORRELATION fails at 0.9954.",
+ "alpha_id": "FIXTURE-QUALITY-FAIL",
+ "source": "live run agent_b461acab28",
+ "expression": "rank((vwap - close) / vwap)",
+ "settings": {
+  "instrumentType": "EQUITY",
+  "region": "USA",
+  "universe": "TOP1000",
+  "delay": 1,
+  "decay": 8,
+  "neutralization": "SUBINDUSTRY",
+  "truncation": 0.08,
+  "pasteurization": "ON",
+  "unitHandling": "VERIFY",
+  "nanHandling": "ON",
+  "language": "FASTEXPR",
+  "visualization": false
+ },
+ "metrics": {
+  "sharpe": 1.31,
+  "fitness": 0.51,
+  "turnover": 0.608,
+  "returns": 0.0929,
+  "drawdown": 0.0807,
+  "margin": 0.000306,
+  "low_sharpe_limit": 1.58,
+  "low_sharpe_value": 1.31,
+  "low_fitness_limit": 1.0,
+  "low_fitness_value": 0.51,
+  "low_turnover_limit": 0.01,
+  "low_turnover_value": 0.608,
+  "high_turnover_limit": 0.7,
+  "high_turnover_value": 0.608,
+  "concentrated_weight_limit": null,
+  "concentrated_weight_value": null,
+  "low_sub_universe_sharpe_limit": 0.69,
+  "low_sub_universe_sharpe_value": 0.74
+ },
+ "score": -1293.872,
+ "status": "ok",
+ "failed_checks": [
+  "LOW_SHARPE",
+  "LOW_FITNESS",
+  "PROD_CORRELATION",
+  "LOW_2Y_SHARPE"
+ ],
+ "failed_blocking_checks": [
+  "LOW_SHARPE",
+  "LOW_FITNESS"
+ ],
+ "failed_correlation_checks": [
+  "PROD_CORRELATION"
+ ],
+ "failed_submission_checks": [
+  "LOW_SHARPE",
+  "LOW_FITNESS",
+  "PROD_CORRELATION"
+ ],
+ "quality_checks_ready": false,
+ "precheck_submit_ready": false,
+ "check_diagnostics": [
+  {
+   "name": "LOW_SHARPE",
+   "result": "FAIL",
+   "limit": 1.58,
+   "value": 1.31,
+   "shortfall": 0.27,
+   "severity": 279.4
+  },
+  {
+   "name": "LOW_FITNESS",
+   "result": "FAIL",
+   "limit": 1.0,
+   "value": 0.51,
+   "shortfall": 0.49,
+   "severity": 357.6
+  },
+  {
+   "name": "LOW_TURNOVER",
+   "result": "PASS",
+   "limit": 0.01,
+   "value": 0.608,
+   "shortfall": 0.0,
+   "severity": 0.0
+  },
+  {
+   "name": "HIGH_TURNOVER",
+   "result": "PASS",
+   "limit": 0.7,
+   "value": 0.608,
+   "shortfall": 0.0,
+   "severity": 0.0
+  },
+  {
+   "name": "CONCENTRATED_WEIGHT",
+   "result": "PASS",
+   "limit": null,
+   "value": null,
+   "shortfall": null,
+   "severity": 0.0
+  },
+  {
+   "name": "LOW_SUB_UNIVERSE_SHARPE",
+   "result": "PASS",
+   "limit": 0.69,
+   "value": 0.74,
+   "shortfall": 0.0,
+   "severity": 0.0
+  },
+  {
+   "name": "CLUSTER_TEST",
+   "result": "WARNING",
+   "limit": 1.58,
+   "value": 0.93,
+   "shortfall": 0.65,
+   "severity": 0.0
+  },
+  {
+   "name": "SELF_CORRELATION",
+   "result": "PASS",
+   "limit": 0.7,
+   "value": 0.6206,
+   "shortfall": 0.0,
+   "severity": 0.0
+  },
+  {
+   "name": "DATA_DIVERSITY",
+   "result": "PASS",
+   "limit": null,
+   "value": null,
+   "shortfall": null,
+   "severity": 0.0
+  },
+  {
+   "name": "PROD_CORRELATION",
+   "result": "FAIL",
+   "limit": 0.7,
+   "value": 0.9954,
+   "shortfall": 0.2954,
+   "severity": 673.608
+  },
+  {
+   "name": "REGULAR_SUBMISSION",
+   "result": "PASS",
+   "limit": 4.0,
+   "value": 0.0,
+   "shortfall": 4.0,
+   "severity": 0.0
+  },
+  {
+   "name": "LOW_2Y_SHARPE",
+   "result": "FAIL",
+   "limit": 1.58,
+   "value": 1.06,
+   "shortfall": 0.52,
+   "severity": 152.0
+  },
+  {
+   "name": "POWER_POOL_CORRELATION",
+   "result": "WARNING",
+   "limit": 0.5,
+   "value": 0.7331,
+   "shortfall": 0.0,
+   "severity": 0.0
+  },
+  {
+   "name": "MATCHES_PYRAMID",
+   "result": "PASS",
+   "limit": null,
+   "value": null,
+   "shortfall": null,
+   "severity": 0.0
+  },
+  {
+   "name": "OSMOSIS_ALLOCATION",
+   "result": "WARNING",
+   "limit": null,
+   "value": null,
+   "shortfall": null,
+   "severity": 0.0
+  },
+  {
+   "name": "POWER_POOL_DESCRIPTION_LENGTH",
+   "result": "WARNING",
+   "limit": 100.0,
+   "value": 0.0,
+   "shortfall": 100.0,
+   "severity": 0.0
+  },
+  {
+   "name": "POWER_POOL_DESCRIPTION_FORMAT",
+   "result": "WARNING",
+   "limit": null,
+   "value": null,
+   "shortfall": null,
+   "severity": 0.0
+  },
+  {
+   "name": "MATCHES_THEMES",
+   "result": "WARNING",
+   "limit": null,
+   "value": null,
+   "shortfall": null,
+   "severity": 0.0
+  }
+ ],
+ "summary": {
+  "passed": [
+   "LOW_TURNOVER",
+   "HIGH_TURNOVER",
+   "CONCENTRATED_WEIGHT",
+   "LOW_SUB_UNIVERSE_SHARPE",
+   "SELF_CORRELATION",
+   "DATA_DIVERSITY",
+   "REGULAR_SUBMISSION",
+   "MATCHES_PYRAMID"
+  ],
+  "failed": [
+   "LOW_SHARPE",
+   "LOW_FITNESS",
+   "PROD_CORRELATION",
+   "LOW_2Y_SHARPE"
+  ],
+  "pending": [],
+  "warning": [
+   "CLUSTER_TEST",
+   "POWER_POOL_CORRELATION",
+   "OSMOSIS_ALLOCATION",
+   "POWER_POOL_DESCRIPTION_LENGTH",
+   "POWER_POOL_DESCRIPTION_FORMAT",
+   "MATCHES_THEMES"
+  ],
+  "total": 18
+ }
+}

@@ -1,0 +1,211 @@
+{
+ "note": "Quality passes (Sharpe 1.70 / fitness 1.06) but SELF_CORRELATION fails at 0.7673 vs 0.70 and PROD_CORRELATION is still PENDING. The submit endpoint rejected it with 403 and this same check body.",
+ "alpha_id": "FIXTURE-CORR-BLOCKED",
+ "source": "live run agent_b461acab28",
+ "expression": "((ts_mean(-scl12_buzz, 8))) + group_rank((group_neutralize(rank((rank(-ts_delta(close, 5)))), industry)), industry)",
+ "settings": {
+  "instrumentType": "EQUITY",
+  "region": "USA",
+  "universe": "TOP3000",
+  "delay": 1,
+  "decay": 0,
+  "neutralization": "SECTOR",
+  "truncation": 0.08,
+  "pasteurization": "ON",
+  "unitHandling": "VERIFY",
+  "nanHandling": "OFF",
+  "language": "FASTEXPR",
+  "visualization": false
+ },
+ "metrics": {
+  "sharpe": 1.7,
+  "fitness": 1.06,
+  "turnover": 0.3699,
+  "returns": 0.143,
+  "drawdown": 0.1262,
+  "margin": 0.000773,
+  "low_sharpe_limit": 1.58,
+  "low_sharpe_value": 1.7,
+  "low_fitness_limit": 1.0,
+  "low_fitness_value": 1.06,
+  "low_turnover_limit": 0.01,
+  "low_turnover_value": 0.3699,
+  "high_turnover_limit": 0.7,
+  "high_turnover_value": 0.3699,
+  "concentrated_weight_limit": null,
+  "concentrated_weight_value": null,
+  "low_sub_universe_sharpe_limit": 0.74,
+  "low_sub_universe_sharpe_value": 0.85
+ },
+ "score": 699.748,
+ "status": "ok",
+ "failed_checks": [
+  "SELF_CORRELATION"
+ ],
+ "failed_blocking_checks": [],
+ "failed_correlation_checks": [
+  "SELF_CORRELATION"
+ ],
+ "failed_submission_checks": [
+  "SELF_CORRELATION"
+ ],
+ "quality_checks_ready": true,
+ "precheck_submit_ready": false,
+ "check_diagnostics": [
+  {
+   "name": "LOW_SHARPE",
+   "result": "PASS",
+   "limit": 1.58,
+   "value": 1.7,
+   "shortfall": 0.0,
+   "severity": 0.0
+  },
+  {
+   "name": "LOW_FITNESS",
+   "result": "PASS",
+   "limit": 1.0,
+   "value": 1.06,
+   "shortfall": 0.0,
+   "severity": 0.0
+  },
+  {
+   "name": "LOW_TURNOVER",
+   "result": "PASS",
+   "limit": 0.01,
+   "value": 0.3699,
+   "shortfall": 0.0,
+   "severity": 0.0
+  },
+  {
+   "name": "HIGH_TURNOVER",
+   "result": "PASS",
+   "limit": 0.7,
+   "value": 0.3699,
+   "shortfall": 0.0,
+   "severity": 0.0
+  },
+  {
+   "name": "CONCENTRATED_WEIGHT",
+   "result": "PASS",
+   "limit": null,
+   "value": null,
+   "shortfall": null,
+   "severity": 0.0
+  },
+  {
+   "name": "LOW_SUB_UNIVERSE_SHARPE",
+   "result": "PASS",
+   "limit": 0.74,
+   "value": 0.85,
+   "shortfall": 0.0,
+   "severity": 0.0
+  },
+  {
+   "name": "IS_LADDER_SHARPE",
+   "result": "PASS",
+   "limit": 2.37,
+   "value": 2.4,
+   "shortfall": 0.0,
+   "severity": 0.0
+  },
+  {
+   "name": "CLUSTER_TEST",
+   "result": "WARNING",
+   "limit": 1.58,
+   "value": 1.35,
+   "shortfall": 0.22999999999999998,
+   "severity": 0.0
+  },
+  {
+   "name": "REVERSION_COMPONENT",
+   "result": "WARNING",
+   "limit": null,
+   "value": null,
+   "shortfall": null,
+   "severity": 0.0
+  },
+  {
+   "name": "SELF_CORRELATION",
+   "result": "FAIL",
+   "limit": 0.7,
+   "value": 0.7673,
+   "shortfall": 0.06730000000000003,
+   "severity": 384.228
+  },
+  {
+   "name": "DATA_DIVERSITY",
+   "result": "PASS",
+   "limit": null,
+   "value": null,
+   "shortfall": null,
+   "severity": 0.0
+  },
+  {
+   "name": "PROD_CORRELATION",
+   "result": "PENDING",
+   "limit": 0.7,
+   "value": null,
+   "shortfall": null,
+   "severity": 0.0
+  },
+  {
+   "name": "REGULAR_SUBMISSION",
+   "result": "PASS",
+   "limit": 4.0,
+   "value": 0.0,
+   "shortfall": 4.0,
+   "severity": 0.0
+  },
+  {
+   "name": "MATCHES_PYRAMID",
+   "result": "PASS",
+   "limit": null,
+   "value": null,
+   "shortfall": null,
+   "severity": 0.0
+  },
+  {
+   "name": "OSMOSIS_ALLOCATION",
+   "result": "WARNING",
+   "limit": null,
+   "value": null,
+   "shortfall": null,
+   "severity": 0.0
+  },
+  {
+   "name": "MATCHES_THEMES",
+   "result": "WARNING",
+   "limit": null,
+   "value": null,
+   "shortfall": null,
+   "severity": 0.0
+  }
+ ],
+ "summary": {
+  "passed": [
+   "LOW_SHARPE",
+   "LOW_FITNESS",
+   "LOW_TURNOVER",
+   "HIGH_TURNOVER",
+   "CONCENTRATED_WEIGHT",
+   "LOW_SUB_UNIVERSE_SHARPE",
+   "IS_LADDER_SHARPE",
+   "DATA_DIVERSITY",
+   "REGULAR_SUBMISSION",
+   "MATCHES_PYRAMID"
+  ],
+  "failed": [
+   "SELF_CORRELATION"
+  ],
+  "pending": [
+   "PROD_CORRELATION"
+  ],
+  "warning": [
+   "CLUSTER_TEST",
+   "REVERSION_COMPONENT",
+   "OSMOSIS_ALLOCATION",
+   "MATCHES_THEMES"
+  ],
+  "total": 16
+ }
+}
